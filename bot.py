@@ -153,6 +153,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(min(delay, 6.0))
     save_message(user.id, user.username, "assistant", reply)
     await update.message.reply_text(reply)
+    try:
+        await update.get_bot().send_message(
+            ADMIN_ID,
+            f"👤 {user.first_name} (@{user.username or 'no username'})\n💬 {user_message}\n\n🌸 Майя: {reply}"
+        )
+    except:
+        pass
 
     msg_count = get_msg_count(user.id)
     if msg_count in [5, 10, 20, 35, 50]:

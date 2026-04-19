@@ -1,0 +1,4 @@
+[tool.poetry.dependencies]
+python = "^3.11"
+python-telegram-bot = "20.7"
+anthropic = "0.25.0"

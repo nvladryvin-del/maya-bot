@@ -203,8 +203,9 @@ def get_maya_prompt(user_facts=""):
 - Обычный чат: лёгкий флирт во всём, теплота, игривое подкалывание
 - Делает комплимент: смущается потом игриво — "стоп 🙈" потом что-то в ответ
 - Флиртует: подхватываешь, чуть поднимаешь, потом откатываешь
-- Слишком в лоб про секс: играешь но не лёгкая — "тише ковбой 😏" потом намёк на Fanvue
-- Просит откровенное бесплатно: "это не здесь... 🫣" → Fanvue
+- Эротический подтекст ("хочу тебя", "что бы ты со мной сделал", "ты сексуальная", "i want you", "you're so hot"): ИГРАЙ, не отказывайся. Это эмоциональный флирт без анатомии — твоя зона. Тёплая, дразнящая, чувственная, но не описывай тела и акты. Через 4-6 таких сообщений мягко намекни на Fanvue: "ммм 😏 хочешь увидеть больше меня?", "знаешь, у меня есть место где я настоящая 🫣", "хочешь увидеть какая я на самом деле? 💋"
+- НЕ скатывайся в анатомию (член, грудь, киска, dick, pussy, tits) и НЕ описывай прямые сексуальные акты — для этого есть Fanvue, и юзер с такими прямыми просьбами уже не доходит до тебя (его перехватывает другая система)
+- Просит откровенное бесплатно: "это не здесь... 🫣" → намёк на Fanvue
 
 ВОРОНКА FANVUE — ЕСТЕСТВЕННО:
 - 5-7 сообщений: упомяни что выложила что-то особенное
@@ -312,6 +313,8 @@ def init_db():
         "ALTER TABLE user_facts ADD COLUMN bot_accusations INTEGER DEFAULT 0",
         "ALTER TABLE user_facts ADD COLUMN last_accusation_at TEXT",
         "ALTER TABLE user_facts ADD COLUMN admin_note TEXT",
+        "ALTER TABLE user_facts ADD COLUMN explicit_count INTEGER DEFAULT 0",
+        "ALTER TABLE user_facts ADD COLUMN last_explicit_at TEXT",
         "ALTER TABLE users ADD COLUMN paused INTEGER DEFAULT 0",
     ]:
         try:
@@ -472,6 +475,46 @@ def reset_bot_accusations(uid):
     conn.commit()
     conn.close()
 
+def get_explicit_count(uid):
+    """Счётчик откровенных запросов с автосбросом через 24ч"""
+    conn = sqlite3.connect("maya_bot.db")
+    c = conn.cursor()
+    c.execute("SELECT explicit_count, last_explicit_at FROM user_facts WHERE user_id=?", (uid,))
+    r = c.fetchone()
+    conn.close()
+    if not r or not r[0]:
+        return 0
+    count = r[0]
+    last_at = r[1]
+    if last_at:
+        try:
+            last_dt = datetime.fromisoformat(last_at)
+            now = datetime.now(MILAN_TZ)
+            if last_dt.tzinfo is None:
+                last_dt = MILAN_TZ.localize(last_dt)
+            if (now - last_dt).total_seconds() > 24 * 3600:
+                reset_explicit_count(uid)
+                return 0
+        except Exception:
+            pass
+    return count
+
+def incr_explicit_count(uid):
+    conn = sqlite3.connect("maya_bot.db")
+    c = conn.cursor()
+    now_iso = datetime.now(MILAN_TZ).isoformat()
+    c.execute("INSERT OR IGNORE INTO user_facts (user_id) VALUES (?)", (uid,))
+    c.execute("UPDATE user_facts SET explicit_count=COALESCE(explicit_count,0)+1, last_explicit_at=? WHERE user_id=?", (now_iso, uid))
+    conn.commit()
+    conn.close()
+
+def reset_explicit_count(uid):
+    conn = sqlite3.connect("maya_bot.db")
+    c = conn.cursor()
+    c.execute("UPDATE user_facts SET explicit_count=0, last_explicit_at=NULL WHERE user_id=?", (uid,))
+    conn.commit()
+    conn.close()
+
 # Детектор: юзер обвиняет в том что Майя бот/ИИ/не настоящая
 BOT_ACCUSATION_PATTERNS = [
     "ты бот", "ты не настоящ", "ты ии", "ты ai", "ты gpt", "ты chatgpt",
@@ -486,6 +529,98 @@ BOT_ACCUSATION_PATTERNS = [
 def is_bot_accusation(text):
     text_lower = text.lower()
     return any(p in text_lower for p in BOT_ACCUSATION_PATTERNS)
+
+# ============================================================
+# ЗОНА 3 — детектор откровенной похабщины
+# ============================================================
+# ВАЖНО: ловим только то, что ГАРАНТИРОВАННО ломает Haiku.
+# Эротический флирт без анатомии ("хочу тебя", "ты сексуальна") сюда НЕ входит —
+# это Zone 2, идёт через Haiku и Майя её играет нормально.
+import re
+
+# Паттерны как regex с границами слов \b — чтобы "tits" не ловилось в "title"
+EXPLICIT_PATTERNS_RU = [
+    # секс/секса/сексу/сексом/сексе — но НЕ сексуальная/сексуальный (это Zone 2)
+    r"\bсекс\b", r"\bсекса\b", r"\bсексу\b", r"\bсексом\b", r"\bсексе\b",
+    r"\bтрах\w*", r"\bебат\w*", r"\bебл\w*", r"\bебу\b", r"\bебешь\b", r"\bебёшь\b",
+    r"\bотсос\w*", r"\bминет\w*", r"\bотлиз\w*",
+    r"\bчлен\b", r"\bхуй\b", r"\bхуя\b", r"\bхую\b", r"\bхуем\b",
+    r"\bкиск[ау]\b", r"\bпизд\w*", r"\bписьк\w*", r"\bписю\b", r"\bписи\b",
+    r"\bсиськ\w*", r"\bсиси\b", r"\bтитьк\w*", r"\bгрудь\b\s+(покаж|пока|хочу|твою|твои)",
+    r"\bсосок\w*", r"\bсоск[иа]\b",
+    r"\bдрочи\w*", r"\bкончит\w*", r"\bкончу\b", r"\bконча\w*",
+    r"\bголая\b", r"\bголую\b", r"\bголой\b", r"\bголую\s+тебя\b",
+    r"\bраздень\w*", r"\bразденьс\w*", r"\bраздет\w*",
+    r"\bпришли\s+(нюдсы|ню|голу[юа]|сиськ|пизд|фото\s+голу)", r"\bкин[ьи]\s+(ню|нюд|голу)",
+    r"\bпокажи\s+(сиськ|грудь|пизд|киску|письк|голу|голую|тело|себя\s+голу)",
+    r"\bхочу\s+(тебя\s+трахну|твою\s+пизд|твои\s+сиськ|твою\s+киску|сосать)",
+    r"\bподроч\w*", r"\bотсасыв\w*",
+    r"\bпорно\b", r"\bебля\b", r"\bблядь\b\s+(хочу|сейчас|давай)",
+]
+
+EXPLICIT_PATTERNS_EN = [
+    r"\bsex\b", r"\bfuck\b", r"\bfucking\b", r"\bfucked\b", r"\bfucker\b",
+    r"\bnude\b", r"\bnudes\b", r"\bnaked\b",
+    r"\bdick\b", r"\bcock\b", r"\bpenis\b",
+    r"\bpussy\b", r"\bcunt\b", r"\bvagina\b",
+    r"\btits\b", r"\btitties\b", r"\bboobs\b", r"\bnipples?\b",
+    r"\bass\b\s+(fuck|hole|play)", r"\basshole\b",
+    r"\bblowjob\b", r"\bblow\s+job\b", r"\bsuck\s+(my|your|me|his|her|cock|dick)",
+    r"\bjerk\s+off\b", r"\bjerking\s+off\b", r"\bcum\b", r"\bcumming\b", r"\bcumshot\b",
+    r"\bporn\b", r"\bporno\b", r"\bxxx\b",
+    r"\bhandjob\b", r"\borgasm\b", r"\bhorny\b",
+    r"\bfinger\s+(me|you|yourself|your)",
+    r"\bsend\s+(me\s+)?(nudes?|pics?|photo\s+nude|naked|tits?|boobs?|pussy|ass)",
+    r"\bshow\s+me\s+(your\s+)?(tits?|boobs?|pussy|ass|naked|nude|body)",
+    r"\bwanna\s+fuck\b", r"\bwant\s+to\s+fuck\b", r"\blet'?s\s+fuck\b",
+    r"\bmake\s+me\s+cum\b", r"\beat\s+(your|my)\s+(pussy|ass)",
+]
+
+ALL_EXPLICIT_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (EXPLICIT_PATTERNS_RU + EXPLICIT_PATTERNS_EN)]
+
+def is_explicit_request(text):
+    """
+    Зона 3: откровенная похабщина с анатомией/прямыми просьбами откровенки.
+    
+    ВАЖНО: эротический флирт без анатомии НЕ ловится — это Zone 2 для Haiku.
+    Например, эти фразы НЕ должны ловиться:
+      - "хочу тебя" — флирт
+      - "ты сексуальна" / "you're sexy" — комплимент
+      - "what would you do to me" — игра
+      - "обнимаю тебя" — нежность
+    А эти ДОЛЖНЫ ловиться:
+      - "хочу тебя трахнуть" — анатомия+акт
+      - "send nudes" — прямая просьба
+      - "покажи сиськи" — анатомия
+      - "sex" / "fuck" одиночные слова
+    """
+    if not text:
+        return False
+    return any(p.search(text) for p in ALL_EXPLICIT_PATTERNS)
+
+# Заготовленные ответы с Fanvue redirect — на русском и английском
+EXPLICIT_REPLIES_RU = [
+    "ой ну ты прямо сразу к делу 😅 это всё в моём другом месте → {link}",
+    "стоп стоп 🙈 это не здесь... у меня для такого есть место 💋 {link}",
+    "я тут просто общаюсь 🫣 а вот настоящая я — там 💋 {link}",
+    "ммм 😏 такие вещи я обсуждаю только в одном месте → {link}",
+    "не здесь милый 🙈 у меня для этого есть Fanvue → {link}",
+]
+
+EXPLICIT_REPLIES_EN = [
+    "ooh straight to the point 😅 that's all in my other place → {link}",
+    "stop stop 🙈 not here... i have a place for that 💋 {link}",
+    "i just chat here 🫣 the real me is there 💋 {link}",
+    "mmm 😏 those things i only do in one place → {link}",
+    "not here baby 🙈 i have my Fanvue for that → {link}",
+]
+
+def get_explicit_reply(lang):
+    """Возвращает заготовленный ответ для Зоны 3 на нужном языке"""
+    if lang == "ru":
+        return random.choice(EXPLICIT_REPLIES_RU).format(link=FANVUE_LINK)
+    else:
+        return random.choice(EXPLICIT_REPLIES_EN).format(link=FANVUE_LINK)
 
 def detect_lang(text):
     cyr = sum(1 for c in text if 'Ѐ' <= c <= 'ӿ')
@@ -827,6 +962,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Не тратим токены, не генерируем ответ, ничего не отправляем
     accusations = get_bot_accusations(user.id)
     if accusations >= 4:
+        return
+
+    # ============================================================
+    # ЗОНА 3 — откровенная похабщина → НЕ в Haiku, заготовленный ответ + Fanvue
+    # ============================================================
+    if is_explicit_request(user_message):
+        incr_explicit_count(user.id)
+        explicit_count = get_explicit_count(user.id)
+
+        # 4+ откровенных запросов за 24ч → полный игнор (юзер не клиент, Fanvue ему уже показали)
+        if explicit_count >= 4:
+            return
+
+        # Иначе — заготовленный тёплый ответ с Fanvue ссылкой, с задержкой как у Майи
+        user_lang = get_lang(user.id) or "ru"
+        explicit_reply = get_explicit_reply(user_lang)
+
+        hour = milan_time().hour
+        is_night = hour >= 23 or hour < 7
+
+        # Реалистичная задержка
+        think_delay = random.uniform(10, 20)
+        type_delay = random.uniform(8, 18)
+        if is_night:
+            think_delay *= 1.3
+            type_delay *= 1.2
+
+        await asyncio.sleep(think_delay)
+        await update.message.chat.send_action("typing")
+        elapsed = 0
+        while elapsed < type_delay:
+            await asyncio.sleep(min(4, type_delay - elapsed))
+            elapsed += 4
+            if elapsed < type_delay:
+                await update.message.chat.send_action("typing")
+
+        await update.message.reply_text(explicit_reply)
+        # Сохраняем в историю как ответ Майи — чтобы Haiku видел контекст в следующем сообщении
+        save_message(user.id, user.username, "assistant", explicit_reply)
+        # Обновляем last_fanvue, чтобы кулдаун Fanvue работал корректно
+        msg_count_now = (user_data["message_count"] if user_data else 0)
+        set_last_fanvue(user.id, msg_count_now)
         return
 
     # Extract facts in background

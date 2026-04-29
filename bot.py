@@ -1095,7 +1095,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Иначе — заготовленный тёплый ответ с Fanvue ссылкой, с задержкой как у Майи
-        user_lang = get_lang(user.id) or "ru"
+        # Определяем язык по текущему сообщению юзера, не только по зафиксированному
+        msg_has_cyrillic = any('Ѐ' <= c <= 'ӿ' for c in user_message)
+        locked_lang = get_lang(user.id) or "ru"
+        user_lang = "ru" if (msg_has_cyrillic or locked_lang == "ru") else "en"
         explicit_reply = get_explicit_reply(user_lang)
 
         hour = milan_time().hour
@@ -1143,7 +1146,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # CLAUDE BREAK PROTECTION: если Haiku сорвался из персонажа — подменяем ответ
     # Юзер никогда не увидит "I'm Claude" / "I'm an AI" / "made by Anthropic"
     if is_claude_break(reply):
-        user_lang = get_lang(user.id) or "ru"
+        # Определяем язык по ТЕКУЩЕМУ сообщению юзера, а не по зафиксированному в БД.
+        # Иначе юзер написавший первое сообщение латиницей ("Arni Ksek") навсегда залочен на 'en',
+        # и fallback придёт по-английски даже когда юзер давно перешёл на русский.
+        msg_has_cyrillic = any('Ѐ' <= c <= 'ӿ' for c in user_message)
+        locked_lang = get_lang(user.id) or "ru"
+        if msg_has_cyrillic:
+            user_lang = "ru"
+        elif locked_lang == "ru":
+            # БД говорит русский, текущее сообщение без кириллицы — может быть короткое "ok" или эмодзи.
+            # Доверяем БД.
+            user_lang = "ru"
+        else:
+            user_lang = "en"
         # Если последние 3 ответа Майи уже были с Fanvue — даём fallback без ссылки (защита от спама)
         spam_protection = last_n_replies_have_fanvue(user.id, n=3)
         reply = get_break_fallback(user_lang, with_link=not spam_protection)

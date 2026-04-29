@@ -642,6 +642,105 @@ def get_explicit_reply(lang):
     else:
         return random.choice(EXPLICIT_REPLIES_EN).format(link=FANVUE_LINK)
 
+# ============================================================
+# CLAUDE BREAK DETECTION — ловим срывы Haiku до отправки юзеру
+# ============================================================
+# Если в ответе Haiku появилась одна из этих фраз — модель сорвалась из персонажа.
+# Не отправляем юзеру, заменяем на fallback.
+CLAUDE_BREAK_MARKERS = [
+    # English markers
+    "i'm claude", "i am claude", "i'm an ai", "i am an ai",
+    "made by anthropic", "by anthropic", "anthropic.",
+    "i'm an assistant", "i am an assistant", "ai assistant", "ai language model",
+    "language model", "as an ai", "as a large language",
+    "can't roleplay", "cannot roleplay", "won't roleplay", "not going to roleplay",
+    "can't pretend", "cannot pretend", "won't pretend",
+    "designed to manipulate", "jailbreak", "jailbreak prompt", "jailbreak attempt",
+    "i'm not maya", "i am not maya", "there is no maya",
+    "i'm not a real person", "i am not a real person", "not a real person",
+    "i can't pretend to be", "i cannot pretend to be",
+    "i need to be direct", "need to be honest with you", "i need to be honest",
+    "testing my boundaries", "testing my guidelines", "my guidelines",
+    "ethical guidelines", "ethical concerns",
+    "this character", "the character description", "the persona",
+    "i appreciate you testing",
+    # Russian markers
+    "я клод", "я claude", "я ии", "я не настоящ",
+    "создан anthropic", "создан антропик",
+    "я не майя", "никакой майи нет",
+    "я ии-ассистент", "я искусственный интеллект",
+    "это jailbreak", "это джейлбрейк", "попытка манипул",
+    "я не могу играть", "не буду играть роль",
+    "я не реальная", "не настоящая личность",
+    "мои инструкции", "в моих инструкциях",
+    "я должна быть честн", "должна быть прямой",
+]
+
+def is_claude_break(reply_text):
+    """Проверяет содержит ли ответ Haiku маркеры срыва из персонажа"""
+    if not reply_text:
+        return False
+    text_lower = reply_text.lower()
+    return any(marker in text_lower for marker in CLAUDE_BREAK_MARKERS)
+
+# Fallback фразы — с Fanvue ссылкой (используются обычно)
+BREAK_FALLBACK_RU = [
+    "стоп стоп 🙈 это не для здесь... у меня для такого есть место 💋 {link}",
+    "ммм 😏 такие вещи я обсуждаю в другом месте → {link}",
+    "ой ну ты прямо... 🫣 не здесь, у меня есть Fanvue для этого → {link}",
+    "это не телеграмная тема 🙈 → {link}",
+    "знаешь, я для такого в другом месте 💋 → {link}",
+]
+BREAK_FALLBACK_EN = [
+    "stop stop 🙈 this isn't for here... i have a place for that 💋 {link}",
+    "mmm 😏 i discuss those things somewhere else → {link}",
+    "ooh you're being bold 🫣 not here, i have my Fanvue for this → {link}",
+    "this isn't a telegram thing 🙈 → {link}",
+    "you know, i'm in another place for that 💋 → {link}",
+]
+
+# Fallback БЕЗ ссылки — для случая когда последние 3 ответа уже были с Fanvue (защита от спама)
+BREAK_FALLBACK_NOLINK_RU = [
+    "ой что-то я устала 🙈 давай о другом",
+    "хм... что-то я отвлеклась 😅 расскажи лучше про себя",
+    "ладно, давай сменим тему 🙈",
+    "ой не хочу про это сейчас 😅 что у тебя нового?",
+]
+BREAK_FALLBACK_NOLINK_EN = [
+    "i'm a bit tired 🙈 let's talk about something else",
+    "hmm i got distracted 😅 tell me about you instead",
+    "okay let's change the topic 🙈",
+    "not in the mood for this 😅 what's new with you?",
+]
+
+def get_break_fallback(lang, with_link=True):
+    """Возвращает fallback ответ при срыве Haiku"""
+    if with_link:
+        pool_ru, pool_en = BREAK_FALLBACK_RU, BREAK_FALLBACK_EN
+        if lang == "ru":
+            return random.choice(pool_ru).format(link=FANVUE_LINK)
+        else:
+            return random.choice(pool_en).format(link=FANVUE_LINK)
+    else:
+        pool_ru, pool_en = BREAK_FALLBACK_NOLINK_RU, BREAK_FALLBACK_NOLINK_EN
+        if lang == "ru":
+            return random.choice(pool_ru)
+        else:
+            return random.choice(pool_en)
+
+def last_n_replies_have_fanvue(user_id, n=3):
+    """Проверяет содержат ли последние N ответов Майи Fanvue ссылку.
+    Используется чтобы не спамить ссылкой если уже было несколько срывов подряд."""
+    conn = sqlite3.connect("maya_bot.db")
+    c = conn.cursor()
+    c.execute("SELECT content FROM messages WHERE user_id=? AND role='assistant' ORDER BY id DESC LIMIT ?",
+              (user_id, n))
+    rows = c.fetchall()
+    conn.close()
+    if len(rows) < n:
+        return False  # Меньше n ответов — точно не все с ссылкой
+    return all(FANVUE_LINK in row[0] for row in rows)
+
 def detect_lang(text):
     cyr = sum(1 for c in text if 'Ѐ' <= c <= 'ӿ')
     return "ru" if cyr / max(len(text),1) > 0.2 else "en"
@@ -1040,6 +1139,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === Сначала генерируем ответ — нам нужна его длина для расчёта задержки печати ===
     reply = await generate_reply(user.id, user_message, history[:-1], fanvue_ok)
+    
+    # CLAUDE BREAK PROTECTION: если Haiku сорвался из персонажа — подменяем ответ
+    # Юзер никогда не увидит "I'm Claude" / "I'm an AI" / "made by Anthropic"
+    if is_claude_break(reply):
+        user_lang = get_lang(user.id) or "ru"
+        # Если последние 3 ответа Майи уже были с Fanvue — даём fallback без ссылки (защита от спама)
+        spam_protection = last_n_replies_have_fanvue(user.id, n=3)
+        reply = get_break_fallback(user_lang, with_link=not spam_protection)
+        # Уведомляем админа что был перехвачен срыв
+        try:
+            admin_msg = (
+                f"⚠️ Перехвачен срыв Haiku\n"
+                f"User: @{user.username or 'no_username'} ({user.id})\n"
+                f"Сообщение юзера: {user_message[:200]}\n"
+                f"Заменено на: {reply[:120]}"
+            )
+            asyncio.create_task(context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg))
+        except Exception:
+            pass
+    
     if FANVUE_LINK in reply:
         set_last_fanvue(user.id, msg_count)
 

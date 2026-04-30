@@ -1,6 +1,7 @@
 import os
 import asyncio
 import random
+import re
 import sqlite3
 from datetime import datetime
 import pytz
@@ -840,7 +841,6 @@ def is_bot_accusation(text):
 # ВАЖНО: ловим только то, что ГАРАНТИРОВАННО ломает Haiku.
 # Эротический флирт без анатомии ("хочу тебя", "ты сексуальна") сюда НЕ входит —
 # это Zone 2, идёт через Haiku и Майя её играет нормально.
-import re
 
 # Паттерны как regex с границами слов \b — чтобы "tits" не ловилось в "title"
 EXPLICIT_PATTERNS_RU = [
